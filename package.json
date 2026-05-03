@@ -1,11 +1,11 @@
 {
-  "name": "sudoai",
+  "name": "sudoai-cli",
   "version": "1.0.0",
   "description": "A local-first AI runtime for developers, built as a terminal-native operating layer.",
   "license": "MIT",
   "main": "dist/index.js",
   "bin": {
-    "sudoai": "./dist/index.js"
+    "sudoai": "dist/index.js"
   },
   "keywords": [
     "ai",
@@ -16,11 +16,17 @@
     "developer-tools"
   ],
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

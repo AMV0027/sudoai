@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./image/sudoai_logo.png" alt="sudoai logo" />
+  <img src="https://raw.githubusercontent.com/AMV0027/sudoai/main/image/sudoai_logo.png" alt="sudoai logo" />
 </p>
 
 <h1 align="center">sudoai</h1>
@@ -50,10 +50,10 @@ npm install
 npm run build
 ```
 
-Alternatively, link the package globally to use the `sudoai` command anywhere:
+Alternatively, install it globally:
 
 ```bash
-npm link
+npm install -g sudoai-cli
 ```
 
 ## 📖 Usage
