@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="C:\Users\amvk2\.gemini\antigravity\brain\3a494429-325f-4789-b5a1-4ad2538e61c3\sudoai_logo_1777817837166.png" width="120" alt="sudoai logo" />
+  <img src="./images/audoai_logo.png" width="120" alt="sudoai logo" />
 </p>
 
 <h1 align="center">sudoai</h1>
@@ -59,19 +59,25 @@ npm link
 ## 📖 Usage
 
 ### 1. Interactive Mode
+
 Launch the full conversational terminal interface:
+
 ```bash
 sudoai
 ```
 
 ### 2. Single Question
+
 Get a quick response to a single query:
+
 ```bash
 sudoai "How do I list all files in the current directory recursively?"
 ```
 
 ### 3. Image Analysis
+
 Analyze an image with a question:
+
 ```bash
 sudoai "What is in this image?" --img "./path/to/image.png"
 ```
