@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./images/audoai_logo.png" width="120" alt="sudoai logo" />
+  <img src="./image/sudoai_logo.png" alt="sudoai logo" />
 </p>
 
 <h1 align="center">sudoai</h1>
