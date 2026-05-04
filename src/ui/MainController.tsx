@@ -9,7 +9,7 @@ import { AgentEngine } from '../engine/index.js';
 import { OllamaProvider } from '../llm/ollama.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { shellExecTool } from '../tools/shell.js';
-import { readFileTool, writeFileTool, listFilesTool, searchFilesTool } from '../tools/fs.js';
+import { readFileTool, writeFileTool, listFilesTool, searchFilesTool, fileStatsTool } from '../tools/fs.js';
 import { webSearchTool, fetchUrlTool } from '../tools/web.js';
 import { askUserTool } from '../tools/interactive.js';
 import { MCPManager } from '../utils/mcp.js';
@@ -35,6 +35,7 @@ export const MainController: React.FC<MainControllerProps> = ({ configManager })
     r.register(writeFileTool);
     r.register(listFilesTool);
     r.register(searchFilesTool);
+    r.register(fileStatsTool);
     r.register(webSearchTool);
     r.register(fetchUrlTool);
     r.register(askUserTool);
@@ -60,8 +61,8 @@ export const MainController: React.FC<MainControllerProps> = ({ configManager })
     };
   }, []);
 
-  const handleSetupComplete = (model: string) => {
-    configManager.save({ model, setupComplete: true });
+  const handleSetupComplete = (model: string, ollamaApiKey: string) => {
+    configManager.save({ model, ollamaApiKey, setupComplete: true });
     setView('chat');
   };
 

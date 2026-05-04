@@ -12,7 +12,7 @@ import { HistoryManager } from './memory/history.js';
 import { AgentEngine } from './engine/index.js';
 
 const program = new Command();
-const configManager = new ConfigManager();
+const configManager = ConfigManager.getInstance();
 
 program
   .name('sudoai')

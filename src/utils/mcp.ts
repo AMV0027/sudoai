@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { getDataDir } from './paths.js';
 
 export interface MCPServerConfig {
   command: string;
@@ -16,10 +17,7 @@ export class MCPManager {
   private sudoaiConfigPath: string;
 
   constructor() {
-    const dataDir = path.join(process.cwd(), '.sudoai');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+    const dataDir = getDataDir();
     this.sudoaiConfigPath = path.join(dataDir, 'mcp.json');
     this.ensureConfig();
   }

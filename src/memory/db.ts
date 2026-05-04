@@ -1,15 +1,9 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { getDataDir } from '../utils/paths.js';
 
 // Ensure data directory exists
-const dataDir = path.join(process.cwd(), '.sudoai');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
+const dataDir = getDataDir();
 
 const dbPath = path.join(dataDir, 'memory.db');
 const db = new Database(dbPath) as any;

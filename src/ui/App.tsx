@@ -90,26 +90,38 @@ export const App: React.FC<AppProps> = ({ engine, onCommand }) => {
           </Box>
         )}
         
-        {visibleMessages.map((msg, index) => (
-          <Box key={index} flexDirection="column" marginBottom={1}>
-            <Box>
-              <Text color={msg.role === 'user' ? 'green' : (msg.role === 'tool' ? 'yellow' : 'white')} bold>
-                {msg.role === 'user' ? '❯ ' : (msg.role === 'tool' ? '● ' : '● ')}
-              </Text>
-              <Text>{msg.content}</Text>
+        {visibleMessages.map((msg, index) => {
+          // Filter out raw tool result messages — they're internal engine state
+          if (msg.role === 'tool') {
+            const toolName = (msg as any).tool_calls?.name || 'tool';
+            return (
+              <Box key={index} marginBottom={1}>
+                <Text color="yellow" dimColor>  ⚡ Used: {toolName}</Text>
+              </Box>
+            );
+          }
+
+          // Filter out system messages (engine directives) from display
+          if (msg.role === 'system') {
+            return null;
+          }
+
+          return (
+            <Box key={index} flexDirection="column" marginBottom={1}>
+              <Box>
+                <Text color={msg.role === 'user' ? 'green' : 'cyan'} bold>
+                  {msg.role === 'user' ? '❯ ' : '● '}
+                </Text>
+                <Text wrap="wrap">{msg.content}</Text>
+              </Box>
+              {msg.thought && (
+                <Box marginLeft={2} marginTop={0}>
+                  <Text dimColor italic>[{msg.thought}]</Text>
+                </Box>
+              )}
             </Box>
-            {msg.plan && (
-              <Box marginLeft={2} marginTop={0}>
-                <Text color="cyan" dimColor>[PLAN] {msg.plan}</Text>
-              </Box>
-            )}
-            {msg.thought && (
-              <Box marginLeft={2} marginTop={0}>
-                <Text dimColor italic>[THOUGHT] {msg.thought}</Text>
-              </Box>
-            )}
-          </Box>
-        ))}
+          );
+        })}
 
         {scrollOffset + maxVisibleMessages < messages.length && (
           <Box justifyContent="center">

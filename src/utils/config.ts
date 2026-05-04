@@ -1,29 +1,37 @@
 import fs from 'fs';
 import path from 'path';
+import { getDataDir } from './paths.js';
 
 export interface AppConfig {
   model: string;
   mcpEnabled: boolean;
   setupComplete: boolean;
+  ollamaApiKey?: string;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
   model: '',
   mcpEnabled: false,
   setupComplete: false,
+  ollamaApiKey: '',
 };
 
 export class ConfigManager {
+  private static instance: ConfigManager;
   private configPath: string;
   private config: AppConfig;
 
-  constructor() {
-    const dataDir = path.join(process.cwd(), '.sudoai');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+  private constructor() {
+    const dataDir = getDataDir();
     this.configPath = path.join(dataDir, 'config.json');
     this.config = this.load();
+  }
+
+  public static getInstance(): ConfigManager {
+    if (!ConfigManager.instance) {
+      ConfigManager.instance = new ConfigManager();
+    }
+    return ConfigManager.instance;
   }
 
   private load(): AppConfig {
@@ -39,8 +47,12 @@ export class ConfigManager {
   }
 
   save(config: Partial<AppConfig>) {
-    this.config = { ...this.config, ...config };
-    fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    try {
+      this.config = { ...this.config, ...config };
+      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    } catch (e: any) {
+      console.error('Failed to save config:', e.message);
+    }
   }
 
   get(): AppConfig {

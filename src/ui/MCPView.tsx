@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { MCPManager, MCPConfig } from '../utils/mcp.js';
+import { getDataDir } from '../utils/paths.js';
+import path from 'path';
 
 interface MCPViewProps {
   onBack: () => void;
@@ -16,6 +18,7 @@ export const MCPView: React.FC<MCPViewProps> = ({ onBack }) => {
   }, []);
 
   const servers = Object.entries(config.mcpServers);
+  const sudoaiConfigPath = path.join(getDataDir(), 'mcp.json');
 
   useInput((input, key) => {
     if (key.upArrow) {
@@ -33,7 +36,7 @@ export const MCPView: React.FC<MCPViewProps> = ({ onBack }) => {
       
       <Box flexDirection="column" marginTop={1}>
         <Text dimColor>Claude Config: {manager.getClaudeConfigPath() || 'Not found'}</Text>
-        <Text dimColor>SudoAI Config: .sudoai/mcp.json</Text>
+        <Text dimColor>SudoAI Config: {sudoaiConfigPath}</Text>
       </Box>
 
       {servers.length === 0 ? (
@@ -57,7 +60,7 @@ export const MCPView: React.FC<MCPViewProps> = ({ onBack }) => {
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>ESC/B: Back | Add custom servers in .sudoai/mcp.json</Text>
+        <Text dimColor>ESC/B: Back | Add custom servers in: {sudoaiConfigPath}</Text>
       </Box>
     </Box>
   );
