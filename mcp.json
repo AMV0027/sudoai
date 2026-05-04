@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "Wikipedia": {
+      "command": "npx",
+      "args": ["-y", "wikipedia-mcp"]
+    },
+    "Context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@latest"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "./"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "firecrawl-mcp": {
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp"],
+      "env": {
+        "FIRECRAWL_API_KEY": "YOUR-API-KEY"
+      }
+    },
+    "alterlab": {
+      "command": "npx",
+      "args": ["-y", "alterlab-mcp-server"],
+      "env": {
+        "ALTERLAB_API_KEY": "sk_live_your_key_here"
+      }
+    },
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"]
+    }
+  }
+}

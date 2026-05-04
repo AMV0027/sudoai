@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Box, Text, useInput, useApp, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
+import fs from 'fs';
 import { AgentEngine } from '../engine/index.js';
 import { Header } from './components/Header.js';
 import { Message } from '../memory/history.js';
@@ -53,14 +54,20 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
   const [queue, setQueue] = useState<string[]>([]);
   const [currentStatus, setCurrentStatus] = useState('');
   const [scrollLine, setScrollLine] = useState(0); // offset in rendered lines
+  
+  // Autocomplete state
+  const [autocompleteVisible, setAutocompleteVisible] = useState(false);
+  const [autocompleteOptions, setAutocompleteOptions] = useState<string[]>([]);
+  const [autocompleteIndex, setAutocompleteIndex] = useState(0);
+  
   const { exit } = useApp();
   const { stdout } = useStdout();
 
   const termWidth = stdout?.columns || 80;
   const termHeight = stdout?.rows || 24;
 
-  // Reserve lines for: header (~5) + status bar (~2 when loading) + input box (~3)
-  const RESERVED = 10;
+  // Reserve lines for: header (~5) + status bar (~2 when loading) + input box (~3) + autocomplete (~6)
+  const RESERVED = 15;
   const viewportLines = Math.max(4, termHeight - RESERVED);
 
   // Initial sync from persisted history
@@ -75,7 +82,8 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
   const lineCounts = displayable.map(msg => {
     if (msg.role === 'tool') return 1;
     const thought = (msg as any).thought as string | undefined;
-    return estimateLines(msg.content, termWidth) + (thought ? 1 : 0);
+    const imgCount = msg.images?.length ? 1 : 0; // count images as taking up a line for placeholder
+    return estimateLines(msg.content, termWidth) + (thought ? 1 : 0) + imgCount;
   });
   const totalLines = lineCounts.reduce((a, b) => a + b, 0);
 
@@ -117,12 +125,12 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
       setLoading(true);
 
       try {
-        const { cleanInput, context } = await parseInputContext(nextQuery);
+        const { cleanInput, context, images } = await parseInputContext(nextQuery);
         const enrichedInput = context 
           ? `${cleanInput}\n\n${context}`
           : cleanInput;
 
-        await engine.run(enrichedInput, (update: string) => {
+        await engine.run(enrichedInput, images, (update: string) => {
           setCurrentStatus(update);
         });
         setMessages(engine.getHistory().getMessages());
@@ -137,14 +145,64 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
     processQueue();
   }, [queue, loading, engine]);
 
+  // ── Input change handler for Autocomplete ────────────────────────────────
+  const handleInputChange = (newInput: string) => {
+    setInput(newInput);
+    
+    // Check if we are currently typing a mention at the end of the input
+    const match = newInput.match(/@([^\s]*)$/);
+    if (match) {
+      const prefix = match[1];
+      
+      try {
+        const cwd = process.cwd();
+        const files = fs.readdirSync(cwd);
+        // Filter out hidden files unless explicitly typing a dot, and match prefix
+        const filtered = files.filter(f => {
+           if (!prefix && f.startsWith('.')) return false;
+           return f.toLowerCase().startsWith(prefix.toLowerCase());
+        }).slice(0, 5); // Limit to top 5 results for neat UI
+
+        if (filtered.length > 0) {
+          setAutocompleteOptions(filtered);
+          setAutocompleteVisible(true);
+          setAutocompleteIndex(0);
+        } else {
+          setAutocompleteVisible(false);
+          setAutocompleteOptions([]);
+        }
+      } catch {
+        setAutocompleteVisible(false);
+        setAutocompleteOptions([]);
+      }
+    } else {
+      setAutocompleteVisible(false);
+      setAutocompleteOptions([]);
+    }
+  };
+
   // ── Submit handler ─────────────────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
+    if (autocompleteVisible && autocompleteOptions.length > 0) {
+      // If we press enter during autocomplete, we assume they want to complete the mention instead of submitting the message.
+      const selected = autocompleteOptions[autocompleteIndex];
+      if (selected) {
+        const updatedInput = input.replace(/@([^\s]*)$/, `@${selected} `);
+        setInput(updatedInput);
+      }
+      setAutocompleteVisible(false);
+      setAutocompleteOptions([]);
+      return;
+    }
+
     if (!input.trim()) return;
 
     if (input.startsWith('/')) {
       const cmd = input.trim().toLowerCase();
       onCommand?.(cmd);
       setInput('');
+      setAutocompleteVisible(false);
+      setAutocompleteOptions([]);
       return;
     }
 
@@ -152,11 +210,39 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: userMsg } as Message]);
     setQueue(prev => [...prev, userMsg]);
-  }, [input, onCommand]);
+  }, [input, onCommand, autocompleteVisible, autocompleteOptions, autocompleteIndex]);
 
   // ── Keyboard ───────────────────────────────────────────────────────────────
+  const inputRef = React.useRef(input);
+  inputRef.current = input;
+
+  const autocompleteStateRef = React.useRef({ visible: autocompleteVisible, options: autocompleteOptions, index: autocompleteIndex });
+  autocompleteStateRef.current = { visible: autocompleteVisible, options: autocompleteOptions, index: autocompleteIndex };
+
   useInput((_input: string, key: any) => {
     if (key.escape || (key.ctrl && _input === 'c')) exit();
+
+    if (autocompleteStateRef.current.visible) {
+      if (key.upArrow) {
+        setAutocompleteIndex(prev => (prev > 0 ? prev - 1 : autocompleteStateRef.current.options.length - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setAutocompleteIndex(prev => (prev < autocompleteStateRef.current.options.length - 1 ? prev + 1 : 0));
+        return;
+      }
+      if (key.tab || (key.rightArrow)) {
+        // Complete the mention
+        const selected = autocompleteStateRef.current.options[autocompleteStateRef.current.index];
+        if (selected) {
+          const updatedInput = inputRef.current.replace(/@([^\s]*)$/, `@${selected} `);
+          setInput(updatedInput);
+        }
+        setAutocompleteVisible(false);
+        setAutocompleteOptions([]);
+        return;
+      }
+    }
 
     // Scroll: PageUp / PageDown (5 lines), Ctrl+Up / Ctrl+Down (1 line)
     const SCROLL_BIG = Math.max(1, Math.floor(viewportLines / 2));
@@ -195,6 +281,7 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
 
           const thought = (msg as any).thought as string | undefined;
           const isUser = msg.role === 'user';
+          const hasImages = msg.images && msg.images.length > 0;
 
           return (
             <Box key={i} flexDirection="column" marginBottom={1}>
@@ -203,6 +290,9 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
                   {isUser ? '❯ ' : '● '}
                 </Text>
                 <Text wrap="wrap">{msg.content}</Text>
+                {hasImages && (
+                  <Text dimColor> [+{msg.images?.length} image(s)]</Text>
+                )}
               </Box>
               {thought && (
                 <Box marginLeft={2}>
@@ -242,11 +332,25 @@ export const App: React.FC<AppProps> = ({ engine, onCommand, mcpStatus, mode = '
           <Text color={modeColor} bold>❯ </Text>
           <TextInput
             value={input}
-            onChange={setInput}
+            onChange={handleInputChange}
             onSubmit={handleSubmit}
-            placeholder={`[${mode}] Type your message...`}
+            placeholder={`[${mode}] Type your message... (@ to mention files)`}
           />
         </Box>
+        
+        {/* Autocomplete Menu */}
+        {autocompleteVisible && autocompleteOptions.length > 0 && (
+          <Box flexDirection="column" paddingX={2} marginTop={0}>
+            {autocompleteOptions.map((opt, i) => (
+              <Box key={opt}>
+                <Text color={i === autocompleteIndex ? 'magenta' : undefined} bold={i === autocompleteIndex}>
+                  {i === autocompleteIndex ? '▶ ' : '  '}
+                  {opt}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        )}
 
         <Box marginTop={0} paddingX={1}>
           <Text dimColor>

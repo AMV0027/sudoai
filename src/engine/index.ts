@@ -37,6 +37,7 @@ interface TurnItem {
   content: string;
   toolName?: string;
   input?: any;
+  images?: string[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -152,56 +153,31 @@ Rules:
     // ── Agent / Research: tool-enabled ────────────────────────────────────────
     const toolNames = this.registry.getToolNames();
     const toolCatalog = this.registry.getToolCatalog();
-    const firstFileTool = toolNames.find(n => n.includes('list_files')) ?? toolNames[0] ?? 'list_files';
-    const firstWebTool = toolNames.find(n => n.includes('web_search') || n.includes('search')) ?? 'web_search';
     const researchExtra = this.mode === 'research'
-      ? `\nRESEARCH MODE: Search multiple angles. Cross-reference sources. Provide structured answers with sections. Cite sources.`
+      ? `\n[Research Mode active: Search deeply, synthesize, and cite sources]`
       : '';
 
+    // Small Model Optimized Prompt Profile
     return `\
-You are sudoai, a personal AI agent in the terminal.
+System: sudoai agent
 ${envBlock}${researchExtra}
 
-════════════════════════════════════════════
-RESPONSE FORMAT
-════════════════════════════════════════════
-Output EXACTLY ONE JSON object. Nothing else. No markdown. No explanation.
+Task: You are an agent. Solve the user's request. Output ONLY valid JSON. No markdown fences. No explanations.
 
-Call a tool:
-{"thought":"reason","action":"EXACT_TOOL_NAME","input":{"key":"value"}}
+FORMAT:
+Tool call:
+{"thought":"reason","action":"EXACT_TOOL_NAME","input":{"key":"val"}}
 
-Give final answer:
-{"thought":"reason","action":"none","answer":"your answer here"}
+Final answer:
+{"thought":"reason","action":"none","answer":"your final text"}
 
-════════════════════════════════════════════
-EXAMPLES
-════════════════════════════════════════════
-User: hello
-You: {"thought":"greeting","action":"none","answer":"Hello! I'm sudoai. How can I help?"}
-
-User: list the files here
-You: {"thought":"list CWD files","action":"${firstFileTool}","input":{"path":"."}}
-[Tool result]: file1.ts, README.md
-You: {"thought":"have the list","action":"none","answer":"Files:\\n- file1.ts\\n- README.md"}
-
-User: search latest AI news
-You: {"thought":"search web","action":"${firstWebTool}","input":{"query":"latest AI news 2025"}}
-[Tool result]: ...
-You: {"thought":"synthesize","action":"none","answer":"Here is what I found: ..."}
-
-════════════════════════════════════════════
-AVAILABLE TOOLS (use EXACT names)
-════════════════════════════════════════════
+AVAILABLE TOOLS:
 ${toolCatalog}
 
-════════════════════════════════════════════
-RULES
-════════════════════════════════════════════
-- action must be "none" OR an exact tool name listed above
-- For greetings/opinions/general knowledge: use action "none" immediately
-- ONE tool call per response. After a tool result, give your final answer.
-- Do NOT use tool_calls, tool_code, function_call, or any other format
-- Do NOT output {"action":"error"} — use "none" if you are stuck`;
+RULES:
+- Output ONE JSON object per response.
+- action must be "none" or a tool name from the list.
+- Never output raw text outside the JSON.`;
   }
 
 
@@ -214,7 +190,7 @@ RULES
 
     for (const t of turns) {
       if (t.role === 'user') {
-        messages.push({ role: 'user', content: t.content });
+        messages.push({ role: 'user', content: t.content, images: t.images });
       } else if (t.role === 'assistant_final') {
         // Clean final answers go into context as assistant messages
         messages.push({ role: 'assistant', content: t.content });
@@ -279,18 +255,97 @@ RULES
 
   // ── Main run loop ─────────────────────────────────────────────────────────
 
-  async run(userInput: string, onUpdate: (chunk: string) => void): Promise<string> {
-    // HistoryManager is for persistence (displayed in /history view)
-    // Internal turns[] drives the LLM context for this turn only
-    if (userInput) {
-      this.history.addMessage({ role: 'user', content: userInput });
+  async run(userInput: string, images: string[] | undefined, onUpdate: (chunk: string) => void): Promise<string> {
+    if (userInput || (images && images.length > 0)) {
+      this.history.addMessage({ role: 'user', content: userInput, images });
     }
 
+    const allHistory = this.history.getMessages();
+    const recentHistory = allHistory.slice(-6);
+
+    // For simple mode, just do a direct LLM call
+    if (this.mode === 'simple') {
+       return await this.runSimple(recentHistory, onUpdate);
+    }
+
+    // For Agent/Research modes, try task decomposition first
+    onUpdate('🧠 Analyzing task complexity...');
+    const { Planner } = await import('./planner.js');
+    const { Executor } = await import('./executor.js');
+    
+    const planner = new Planner(this.provider);
+    const executor = new Executor(this.provider, this.registry);
+    const toolCatalog = this.registry.getToolCatalog();
+    
+    const contextStr = recentHistory.map(m => `${m.role}: ${m.content}`).join('\n');
+    
+    // Create Plan
+    const plan = await planner.createPlan(userInput, toolCatalog);
+    
+    if (!plan || !plan.steps || plan.steps.length === 0) {
+      // Fallback if planning fails
+      onUpdate('⚠ Planning skipped, executing directly...');
+      return await this.runLegacy(recentHistory, onUpdate);
+    }
+
+    // Execute Plan
+    let currentContext = contextStr;
+    let finalOutput = '';
+
+    for (const step of plan.steps) {
+      const result = await executor.executeStep(step.description, currentContext, onUpdate);
+      if (result.success) {
+        currentContext += `\n[Completed Step: ${step.description}]: ${result.output}`;
+        finalOutput = result.output;
+      } else {
+        onUpdate(`❌ Failed step: ${step.description}`);
+        currentContext += `\n[Failed Step: ${step.description}]: ${result.output}`;
+      }
+    }
+
+    // Synthesis Step
+    onUpdate('⚙ Synthesizing final answer...');
+    const synthesisPrompt = `You are sudoai. Summarize the final result of the following context for the user.\n\nContext:\n${currentContext}\n\nUser asked: ${userInput}\n\nOutput only a JSON object: {"thought":"...","action":"none","answer":"..."}`;
+    
+    try {
+      const resp = await this.provider.generate(
+        [{ role: 'user', content: synthesisPrompt }],
+        { temperature: 0.3, format: 'json' }
+      );
+      const synthStep = extractAgentStep(resp.content.trim());
+      const ans = synthStep?.answer ?? finalOutput ?? 'Task completed.';
+      this.history.addMessage({ role: 'assistant', content: ans });
+      onUpdate(ans);
+      return ans;
+    } catch {
+      const fallback = finalOutput || 'Task completed.';
+      this.history.addMessage({ role: 'assistant', content: fallback });
+      onUpdate(fallback);
+      return fallback;
+    }
+  }
+
+  // ── Simple conversation mode ──────────────────────────────────────────────
+  private async runSimple(recentHistory: any[], onUpdate: (chunk: string) => void): Promise<string> {
+    const turns: TurnItem[] = [];
+    for (const m of recentHistory) {
+      if (m.role === 'user') turns.push({ role: 'user', content: m.content, images: m.images });
+      else if (m.role === 'assistant') turns.push({ role: 'assistant_final', content: m.content });
+    }
+    
+    const { step, raw } = await this.callWithRetry(turns, onUpdate);
+    const ans = step?.answer ?? (stripThinkTags(raw) || 'I could not process that.');
+    this.history.addMessage({ role: 'assistant', content: ans });
+    onUpdate(ans);
+    return ans;
+  }
+
+  // ── Legacy monolithic loop (fallback) ───────────────────────────────────
+  private async runLegacy(recentHistory: any[], onUpdate: (chunk: string) => void): Promise<string> {
     const turns: TurnItem[] = [];
 
-    // Seed turns from persisted history (only user and clean assistant messages)
-    for (const m of this.history.getMessages()) {
-      if (m.role === 'user') turns.push({ role: 'user', content: m.content });
+    for (const m of recentHistory) {
+      if (m.role === 'user') turns.push({ role: 'user', content: m.content, images: m.images });
       else if (m.role === 'assistant') turns.push({ role: 'assistant_final', content: m.content });
     }
 
@@ -310,7 +365,6 @@ RULES
         return err;
       }
 
-      // Format entirely unrecoverable — treat raw text as answer
       if (!step) {
         const clean = stripThinkTags(raw);
         const answer = clean.length > 0
@@ -323,7 +377,6 @@ RULES
 
       const { thought, action, input, answer } = step;
 
-      // ── Final answer ──
       if (!action || action === 'none') {
         const finalAnswer = answer ?? thought ?? 'Done.';
         this.history.addMessage({ role: 'assistant', content: finalAnswer, thought });
@@ -331,7 +384,6 @@ RULES
         return finalAnswer;
       }
 
-      // ── ask_user ──
       if (action === 'ask_user') {
         const q = input?.question ?? thought ?? 'Could you clarify?';
         this.history.addMessage({ role: 'assistant', content: q });
@@ -339,7 +391,6 @@ RULES
         return q;
       }
 
-      // ── Tool lookup (with fuzzy match) ──
       const tool = this.registry.findTool(action);
       if (!tool) {
         onUpdate(`⚙ Unknown tool "${action}", retrying...`);
@@ -351,7 +402,6 @@ RULES
         continue;
       }
 
-      // ── Dedup ──
       const callKey = `${tool.name}::${JSON.stringify(input ?? {})}`;
       if (calledKeys.has(callKey)) {
         turns.push({
@@ -363,10 +413,8 @@ RULES
       }
       calledKeys.add(callKey);
 
-      // ── Execute ──
       onUpdate(`⚙ ${thought ? thought + ' — ' : ''}Calling ${tool.name}...`);
 
-      // Record the tool call turn (NOT fed back to LLM as assistant message)
       turns.push({ role: 'tool_call', content: JSON.stringify({ action: tool.name, input }), toolName: tool.name });
 
       const coercedInput = input
@@ -379,7 +427,6 @@ RULES
         const result = await tool.execute(coercedInput);
         const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
 
-        // Store in persistence for /history
         this.history.addMessage({
           role: 'tool',
           content: resultStr,
@@ -387,10 +434,8 @@ RULES
           tool_results: result
         });
 
-        // Add to LLM context as user observation
         turns.push({ role: 'tool_result', content: resultStr, toolName: tool.name });
 
-        // Guard against empty/error results
         const rObj = typeof result === 'object' && result !== null ? result as any : null;
         if ((rObj?.results && rObj.results.length === 0) || rObj?.error) {
           const reason = rObj?.error ? `Error: ${rObj.error}` : 'No results returned.';
@@ -410,7 +455,6 @@ RULES
       currentStep++;
     }
 
-    // ── Max steps — force synthesis ──
     onUpdate('⚙ Synthesizing final answer...');
     turns.push({
       role: 'system_notice',

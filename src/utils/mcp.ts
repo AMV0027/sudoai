@@ -25,7 +25,26 @@ export class MCPManager {
 
   private ensureConfig() {
     if (!fs.existsSync(this.sudoaiConfigPath)) {
-      fs.writeFileSync(this.sudoaiConfigPath, JSON.stringify({ mcpServers: {} }, null, 2));
+      try {
+        // Resolve project root based on import.meta.url
+        // dist/utils/mcp.js -> root is ../../
+        const currentFilePath = new URL(import.meta.url).pathname;
+        // On Windows, new URL().pathname might start with a leading slash like /C:/..., we can strip it
+        const normalizedPath = os.platform() === 'win32' && currentFilePath.startsWith('/') 
+          ? currentFilePath.slice(1) 
+          : currentFilePath;
+          
+        const defaultMcpPath = path.resolve(path.dirname(normalizedPath), '../../mcp.json');
+        
+        if (fs.existsSync(defaultMcpPath)) {
+          fs.copyFileSync(defaultMcpPath, this.sudoaiConfigPath);
+        } else {
+          fs.writeFileSync(this.sudoaiConfigPath, JSON.stringify({ mcpServers: {} }, null, 2));
+        }
+      } catch (e) {
+        // Fallback
+        fs.writeFileSync(this.sudoaiConfigPath, JSON.stringify({ mcpServers: {} }, null, 2));
+      }
     }
   }
 

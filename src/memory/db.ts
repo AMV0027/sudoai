@@ -42,8 +42,10 @@ db.exec(`
 // Ensure columns exist (for migrations)
 try {
   db.exec('ALTER TABLE messages ADD COLUMN plan TEXT;');
-} catch (e) {
-  // Column already exists
-}
+} catch (e) {}
+
+try {
+  db.exec('ALTER TABLE messages ADD COLUMN images TEXT;');
+} catch (e) {}
 
 export default db;

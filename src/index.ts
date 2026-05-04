@@ -40,7 +40,7 @@ program
       const engine = new AgentEngine({ provider, registry, history });
 
       console.log(`Asking (${config.model}): ${query}`);
-      await engine.run(query, (update: string) => {
+      await engine.run(query, undefined, (update: string) => {
         process.stdout.write(update + '\n');
       });
       process.exit(0);

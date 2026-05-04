@@ -8,12 +8,14 @@ const MAX_DEPTH = 3;
 interface ContextResult {
   cleanInput: string;
   context: string;
+  images?: string[];
 }
 
 export async function parseInputContext(input: string): Promise<ContextResult> {
   const patterns = input.match(/@(\S+)/g) || [];
   let cleanInput = input;
   let contextParts: string[] = [];
+  let images: string[] = [];
   let totalChars = 0;
 
   for (const pattern of patterns) {
@@ -31,15 +33,21 @@ export async function parseInputContext(input: string): Promise<ContextResult> {
     try {
       const stats = fs.statSync(fullPath);
       if (stats.isFile()) {
-        const content = fs.readFileSync(fullPath, 'utf8');
-        const truncated = content.length > MAX_FILE_CHARS 
-          ? content.slice(0, MAX_FILE_CHARS) + '\n... [truncated]' 
-          : content;
-        
-        const part = `[Context: ${pattern}]\n\`\`\`\n${truncated}\n\`\`\``;
-        if (totalChars + part.length < MAX_CONTEXT_CHARS) {
-          contextParts.push(part);
-          totalChars += part.length;
+        const ext = path.extname(fullPath).toLowerCase();
+        if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+          const base64 = fs.readFileSync(fullPath, { encoding: 'base64' });
+          images.push(base64);
+        } else {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const truncated = content.length > MAX_FILE_CHARS 
+            ? content.slice(0, MAX_FILE_CHARS) + '\n... [truncated]' 
+            : content;
+          
+          const part = `[Context: ${pattern}]\n\`\`\`\n${truncated}\n\`\`\``;
+          if (totalChars + part.length < MAX_CONTEXT_CHARS) {
+            contextParts.push(part);
+            totalChars += part.length;
+          }
         }
       } else if (stats.isDirectory()) {
         const structure = getDirectoryStructure(fullPath, rawPath, 0);
@@ -57,7 +65,8 @@ export async function parseInputContext(input: string): Promise<ContextResult> {
 
   return {
     cleanInput: cleanInput || input, // fallback if we stripped everything
-    context: contextParts.join('\n\n')
+    context: contextParts.join('\n\n'),
+    images: images.length > 0 ? images : undefined
   };
 }
 

@@ -20,12 +20,22 @@ export class OllamaProvider implements LLMProvider {
     }
   }
 
-  async generate(messages: LLMMessage[]): Promise<LLMResponse> {
+  async generate(messages: LLMMessage[], options?: import('./types.js').GenerationOptions): Promise<LLMResponse> {
+    const mappedMessages = messages.map(m => {
+      const mapped: any = { role: m.role, content: m.content };
+      if (m.images && m.images.length > 0) {
+        mapped.images = m.images;
+      }
+      return mapped;
+    });
+
     const response = await (ollama.chat as any)({
       model: this.model,
-      messages: messages,
+      messages: mappedMessages,
       stream: false,
       think: this.thinking,
+      options: options?.temperature !== undefined ? { temperature: options.temperature } : undefined,
+      format: options?.format,
     });
 
     const msg = response.message as any;
@@ -35,12 +45,22 @@ export class OllamaProvider implements LLMProvider {
     };
   }
 
-  async generateStream(messages: LLMMessage[], onChunk: (chunk: string) => void): Promise<LLMResponse> {
+  async generateStream(messages: LLMMessage[], onChunk: (chunk: string) => void, options?: import('./types.js').GenerationOptions): Promise<LLMResponse> {
+    const mappedMessages = messages.map(m => {
+      const mapped: any = { role: m.role, content: m.content };
+      if (m.images && m.images.length > 0) {
+        mapped.images = m.images;
+      }
+      return mapped;
+    });
+
     const response = await ollama.chat({
       model: this.model,
-      messages: messages,
+      messages: mappedMessages,
       stream: true,
       think: this.thinking,
+      options: options?.temperature !== undefined ? { temperature: options.temperature } : undefined,
+      format: options?.format,
     } as any);
 
     let fullContent = '';

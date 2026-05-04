@@ -8,6 +8,7 @@ export interface Message {
   plan?: string;
   tool_calls?: any;
   tool_results?: any;
+  images?: string[];
 }
 
 export class HistoryManager {
@@ -27,8 +28,8 @@ export class HistoryManager {
 
   addMessage(message: Message) {
     const stmt = db.prepare(`
-      INSERT INTO messages (session_id, role, content, thought, plan, tool_calls, tool_results)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (session_id, role, content, thought, plan, tool_calls, tool_results, images)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       this.sessionId,
@@ -37,7 +38,8 @@ export class HistoryManager {
       message.thought || null,
       message.plan || null,
       message.tool_calls ? JSON.stringify(message.tool_calls) : null,
-      message.tool_results ? JSON.stringify(message.tool_results) : null
+      message.tool_results ? JSON.stringify(message.tool_results) : null,
+      message.images ? JSON.stringify(message.images) : null
     );
   }
 
@@ -50,6 +52,7 @@ export class HistoryManager {
       plan: row.plan || undefined,
       tool_calls: row.tool_calls ? JSON.parse(row.tool_calls) : undefined,
       tool_results: row.tool_results ? JSON.parse(row.tool_results) : undefined,
+      images: row.images ? JSON.parse(row.images) : undefined,
     }));
   }
 

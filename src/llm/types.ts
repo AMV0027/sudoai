@@ -1,6 +1,7 @@
 export interface LLMMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
+  images?: string[];
 }
 
 export interface LLMResponse {
@@ -13,7 +14,12 @@ export interface LLMResponse {
   };
 }
 
+export interface GenerationOptions {
+  temperature?: number;
+  format?: 'json' | object;
+}
+
 export interface LLMProvider {
-  generate(messages: LLMMessage[]): Promise<LLMResponse>;
-  generateStream(messages: LLMMessage[], onChunk: (chunk: string) => void): Promise<LLMResponse>;
+  generate(messages: LLMMessage[], options?: GenerationOptions): Promise<LLMResponse>;
+  generateStream(messages: LLMMessage[], onChunk: (chunk: string) => void, options?: GenerationOptions): Promise<LLMResponse>;
 }
