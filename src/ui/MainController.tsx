@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from 'ink';
 import { App } from './App.js';
 import { SetupWizard } from './SetupWizard.js';
 import { HistoryView } from './HistoryView.js';
 import { MCPView } from './MCPView.js';
-import { ConfigManager } from '../utils/config.js';
+import { ModeSelector } from './ModeSelector.js';
+import { ConfigManager, AgentMode } from '../utils/config.js';
 import { AgentEngine } from '../engine/index.js';
 import { OllamaProvider } from '../llm/ollama.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -13,7 +14,7 @@ import { readFileTool, writeFileTool, listFilesTool, searchFilesTool, fileStatsT
 import { webSearchTool, fetchUrlTool } from '../tools/web.js';
 import { askUserTool } from '../tools/interactive.js';
 import { MCPManager } from '../utils/mcp.js';
-import { MCPClientManager } from '../tools/mcp_client.js';
+import { MCPClientManager, MCPConnectionResult } from '../tools/mcp_client.js';
 import { HistoryManager } from '../memory/history.js';
 
 interface MainControllerProps {
@@ -21,13 +22,19 @@ interface MainControllerProps {
 }
 
 export const MainController: React.FC<MainControllerProps> = ({ configManager }) => {
-  const [view, setView] = useState<'setup' | 'chat' | 'history' | 'mcp'>(
+  const [view, setView] = useState<'setup' | 'chat' | 'history' | 'mcp' | 'mode-select'>(
     configManager.get().setupComplete ? 'chat' : 'setup'
   );
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [mcpStatus, setMcpStatus] = useState<string>('Initializing MCP...');
+  const [mcpResults, setMcpResults] = useState<MCPConnectionResult[]>([]);
+  const [mcpReady, setMcpReady] = useState(false);
+
+  // Keep a reactive copy of the config so mode changes re-render correctly
+  const [config, setConfig] = useState(() => configManager.get());
+
   const { exit } = useApp();
 
+  // Full tool registry — built once, MCP tools added into it as they connect
   const [registry] = useState(() => {
     const r = new ToolRegistry();
     r.register(shellExecTool);
@@ -47,34 +54,70 @@ export const MainController: React.FC<MainControllerProps> = ({ configManager })
   useEffect(() => {
     const initMCP = async () => {
       const mcpManager = new MCPManager();
-      const config = mcpManager.getCombinedConfig();
-      let toolCount = 0;
-      for (const [name, cfg] of Object.entries(config.mcpServers)) {
-        toolCount += await mcpClient.connectAndRegister(name, cfg, registry);
+      const mcpConfig = mcpManager.getCombinedConfig();
+      const results: MCPConnectionResult[] = [];
+      for (const [name, cfg] of Object.entries(mcpConfig.mcpServers)) {
+        const result = await mcpClient.connectAndRegister(name, cfg, registry);
+        results.push(result);
       }
-      setMcpStatus(`MCP Ready (${toolCount} tools)`);
+      setMcpResults(results);
+      setMcpReady(true);
     };
     initMCP();
-
-    return () => {
-      mcpClient.disconnectAll();
-    };
+    return () => { mcpClient.disconnectAll(); };
   }, []);
 
-  const handleSetupComplete = (model: string, ollamaApiKey: string) => {
-    configManager.save({ model, ollamaApiKey, setupComplete: true });
+  // Stable engine — only recreated when model/mode/session changes, NOT on every render
+  const engine = useMemo(() => {
+    const mode = config.mode ?? 'simple';
+    const activeRegistry = mode === 'simple' ? new ToolRegistry() : registry;
+    const provider = new OllamaProvider({ model: config.model, thinking: config.thinkingEnabled });
+    const history = new HistoryManager(activeSessionId || undefined);
+    return new AgentEngine({ provider, registry: activeRegistry, history, mode });
+  }, [config.model, config.thinkingEnabled, config.mode, activeSessionId]);
+
+  const handleSetupComplete = (
+    model: string,
+    ollamaApiKey: string,
+    thinkingEnabled: boolean,
+    mode: AgentMode
+  ) => {
+    configManager.save({ model, ollamaApiKey, thinkingEnabled, mode, setupComplete: true });
+    const updated = configManager.get();
+    setConfig(updated);
     setView('chat');
   };
 
   const handleCommand = (command: string) => {
-    if (command === '/model') {
+    const cmd = command.trim().toLowerCase();
+    if (cmd === '/model') {
       setView('setup');
-    } else if (command === '/bye') {
+    } else if (cmd === '/bye') {
       exit();
-    } else if (command === '/mcp') {
+    } else if (cmd === '/mcp') {
       setView('mcp');
-    } else if (command === '/history') {
+    } else if (cmd === '/history') {
       setView('history');
+    } else if (cmd === '/mode') {
+      setView('mode-select');
+    } else if (cmd.startsWith('/mode ')) {
+      // Quick inline mode switch: /mode simple|agent|research
+      const newMode = cmd.slice(6).trim() as AgentMode;
+      if (['simple', 'agent', 'research'].includes(newMode)) {
+        configManager.save({ mode: newMode });
+        const updated = configManager.get();
+        setConfig(updated);
+        
+        engine.getHistory().addMessage({
+          role: 'system',
+          content: `Mode switched to ${newMode.toUpperCase()}.`
+        });
+      } else {
+        engine.getHistory().addMessage({
+          role: 'system',
+          content: `Invalid mode: ${newMode}. Available: simple, agent, research.`
+        });
+      }
     }
   };
 
@@ -83,8 +126,16 @@ export const MainController: React.FC<MainControllerProps> = ({ configManager })
     setView('chat');
   };
 
+  // ── Views ─────────────────────────────────────────────────────────────────
+
   if (view === 'setup') {
-    return <SetupWizard onComplete={handleSetupComplete} />;
+    return (
+      <SetupWizard
+        onComplete={handleSetupComplete}
+        initialThinking={config.thinkingEnabled}
+        initialMode={config.mode}
+      />
+    );
   }
 
   if (view === 'history') {
@@ -92,14 +143,46 @@ export const MainController: React.FC<MainControllerProps> = ({ configManager })
   }
 
   if (view === 'mcp') {
-    return <MCPView onBack={() => setView('chat')} />;
+    return <MCPView onBack={() => setView('chat')} connectionResults={mcpResults} />;
   }
 
-  // Initialize engine for chat view
-  const config = configManager.get();
-  const provider = new OllamaProvider(config.model);
-  const history = new HistoryManager(activeSessionId || undefined);
-  const engine = new AgentEngine({ provider, registry, history });
+  if (view === 'mode-select') {
+    return (
+      <ModeSelector
+        currentMode={config.mode ?? 'simple'}
+        onSelect={(newMode) => {
+          configManager.save({ mode: newMode });
+          setConfig(configManager.get());
+          engine.getHistory().addMessage({
+            role: 'system',
+            content: `Mode switched to ${newMode.toUpperCase()}.`
+          });
+          setView('chat');
+        }}
+        onCancel={() => setView('chat')}
+      />
+    );
+  }
 
-  return <App engine={engine} onCommand={handleCommand} />;
+  // ── Chat view ─────────────────────────────────────────────────────────────
+
+  const mode = config.mode ?? 'simple';
+  const totalMcpTools = mcpResults.reduce((sum, r) => sum + r.toolCount, 0);
+  const mcpErrors = mcpResults.filter(r => r.error).length;
+  const mcpStatusText = mode === 'simple'
+    ? undefined
+    : !mcpReady
+      ? 'MCP: loading...'
+      : mcpErrors > 0
+        ? `MCP: ${totalMcpTools} tools (${mcpErrors} failed)`
+        : `MCP: ${totalMcpTools} tools`;
+
+  return (
+    <App
+      engine={engine}
+      onCommand={handleCommand}
+      mcpStatus={mcpStatusText}
+      mode={mode}
+    />
+  );
 };

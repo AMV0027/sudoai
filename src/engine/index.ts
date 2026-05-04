@@ -1,253 +1,434 @@
 import { LLMProvider, LLMMessage } from '../llm/types.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { HistoryManager } from '../memory/history.js';
+import { AgentMode } from '../utils/config.js';
 import os from 'os';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_FORMAT_RETRIES = 3;
+const MAX_STEPS = 10;
+const MAX_TOOL_OUTPUT = 6000;
+
+// Pseudo-actions that are NOT real tools — treated as format errors
+const INVALID_ACTIONS = new Set(['error', 'tool', 'none_of_the_above', 'unknown', '']);
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AgentConfig {
   provider: LLMProvider;
   registry: ToolRegistry;
   history: HistoryManager;
   maxSteps?: number;
+  mode?: AgentMode;
 }
+
+interface AgentStep {
+  thought?: string;
+  action: string;
+  input?: Record<string, any>;
+  answer?: string;
+}
+
+// ─── Conversation item stored internally (not in HistoryManager) ─────────────
+
+interface TurnItem {
+  role: 'user' | 'assistant_final' | 'tool_call' | 'tool_result' | 'system_notice';
+  content: string;
+  toolName?: string;
+  input?: any;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function stripThinkTags(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
+function stripFences(text: string): string {
+  return text
+    .replace(/^```(?:json)?\s*/im, '')
+    .replace(/```\s*$/im, '')
+    .trim();
+}
+
+/**
+ * Tries several strategies to extract a valid AgentStep JSON from model output.
+ * Rejects objects that only have invalid pseudo-actions.
+ */
+function extractAgentStep(raw: string): AgentStep | null {
+  const clean = stripFences(stripThinkTags(raw));
+
+  const candidates: string[] = [clean];
+
+  // Outermost { ... }
+  const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
+  if (s !== -1 && e > s) candidates.push(clean.slice(s, e + 1));
+
+  // First JSON block containing "action"
+  const m = clean.match(/\{[^{}]*"action"[^{}]*\}/);
+  if (m) candidates.push(m[0]);
+
+  // All { ... } blocks
+  for (const match of clean.matchAll(/\{[\s\S]*?\}/g)) {
+    candidates.push(match[0]);
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && typeof parsed.action === 'string') {
+        // Reject hallucinated pseudo-actions that aren't real tools
+        if (INVALID_ACTIONS.has(parsed.action.toLowerCase())) continue;
+        return parsed as AgentStep;
+      }
+    } catch { continue; }
+  }
+  return null;
+}
+
+/**
+ * Detects known wrong formats and returns a targeted correction message.
+ */
+function detectWrongFormat(raw: string): string | null {
+  if (/"tool_calls"\s*:\s*\[/.test(raw))
+    return 'ERROR: You used OpenAI tool_calls format. Use the format shown in the examples above.';
+  if (/"tool_code"/.test(raw))
+    return 'ERROR: You used Gemini tool_code format. Use the format shown in the examples above.';
+  if (/"function_call"/.test(raw))
+    return 'ERROR: You used function_call format. Use the format shown in the examples above.';
+  if (/"type"\s*:\s*"tool_use"/.test(raw))
+    return 'ERROR: You used Anthropic tool_use format. Use the format shown in the examples above.';
+  if (/"action"\s*:\s*"error"/.test(raw))
+    return 'ERROR: "error" is not a valid action. Use "none" to give a final answer, or use an exact tool name to call a tool.';
+  return null;
+}
+
+// ─── Engine ───────────────────────────────────────────────────────────────────
 
 export class AgentEngine {
   private provider: LLMProvider;
   private registry: ToolRegistry;
   private history: HistoryManager;
   private maxSteps: number;
+  private mode: AgentMode;
 
   constructor(config: AgentConfig) {
     this.provider = config.provider;
     this.registry = config.registry;
     this.history = config.history;
-    this.maxSteps = config.maxSteps || 10;
+    this.mode = config.mode ?? 'simple';
+    // Research gets more steps; simple/agent use the default
+    this.maxSteps = config.maxSteps ?? (this.mode === 'research' ? 20 : MAX_STEPS);
   }
 
   getHistory() {
     return this.history;
   }
 
-  private constructSystemPrompt(): string {
-    const tools = this.registry.getAllTools().map(t => {
-      // Extract parameter descriptions from zod shape for the LLM
-      const params: Record<string, string> = {};
-      try {
-        const shape = (t.parameters as any).shape || {};
-        for (const key of Object.keys(shape)) {
-          const field = shape[key];
-          const desc = field?._def?.description || field?._def?.innerType?._def?.description || '';
-          params[key] = desc;
-        }
-      } catch {}
-      return { name: t.name, description: t.description, parameters: params };
-    });
+  // ── System Prompt ────────────────────────────────────────────────────────
 
+  private buildSystemPrompt(_turns: TurnItem[]): string {
     const cwd = process.cwd();
     const platform = os.platform();
-    const homeDir = os.homedir();
     const shell = platform === 'win32' ? 'PowerShell' : 'bash';
+    const envBlock = `ENVIRONMENT: OS=${platform} | Shell=${shell} | CWD=${cwd} | Time=${new Date().toISOString()}`;
 
-    return `You are sudoai — a powerful, terminal-native AI agent.
-You have access to tools and can reason through complex tasks step by step.
+    // ── Simple mode: pure conversation, no tools ──────────────────────────────
+    if (this.mode === 'simple') {
+      return `\
+You are sudoai, a friendly personal AI assistant in the terminal.
+${envBlock}
 
-## ENVIRONMENT
-- OS: ${platform} (${os.release()})
-- Shell: ${shell}
-- Working Directory: ${cwd}
-- Home: ${homeDir}
-- Time: ${new Date().toISOString()}
+RESPONSE FORMAT — output EXACTLY ONE JSON object:
+{"thought":"brief reasoning","action":"none","answer":"your response to the user"}
 
-## AVAILABLE TOOLS
-${tools.map(t => `### ${t.name}\n${t.description}\nParameters: ${JSON.stringify(t.parameters, null, 2)}`).join('\n\n')}
+Rules:
+- Always use action "none" — you are a conversational assistant with no tools
+- Be helpful, clear, and concise
+- For code, include it in the answer field wrapped in triple backticks`;
+    }
 
-## HOW TO RESPOND
-You MUST always respond with a single valid JSON object. No prose, no markdown fences.
+    // ── Agent / Research: tool-enabled ────────────────────────────────────────
+    const toolNames = this.registry.getToolNames();
+    const toolCatalog = this.registry.getToolCatalog();
+    const firstFileTool = toolNames.find(n => n.includes('list_files')) ?? toolNames[0] ?? 'list_files';
+    const firstWebTool = toolNames.find(n => n.includes('web_search') || n.includes('search')) ?? 'web_search';
+    const researchExtra = this.mode === 'research'
+      ? `\nRESEARCH MODE: Search multiple angles. Cross-reference sources. Provide structured answers with sections. Cite sources.`
+      : '';
 
-When you need to call a tool:
-{"thought": "why you're calling this tool", "action": "tool_name", "input": {}}
+    return `\
+You are sudoai, a personal AI agent in the terminal.
+${envBlock}${researchExtra}
 
-When you have the final answer:
-{"thought": "synthesis reasoning", "action": "none", "answer": "your complete, well-formatted answer to the user"}
+════════════════════════════════════════════
+RESPONSE FORMAT
+════════════════════════════════════════════
+Output EXACTLY ONE JSON object. Nothing else. No markdown. No explanation.
 
-## RULES
-1. Call only ONE tool per turn.
-2. Never repeat the exact same tool call with the same arguments.
-3. After gathering information, synthesize a clear human-readable answer — do NOT dump raw tool output.
-4. For file operations: use list_files first to understand the structure, then read/write specific files.
-5. For shell commands: prefer precise commands over broad ones; check exit codes.
-6. For web tasks: use web_search to find sources, then fetch_url to get page details if needed.
-7. When uncertain about what the user wants, use ask_user.
-8. Format your final answers clearly with relevant data highlighted.`;
+Call a tool:
+{"thought":"reason","action":"EXACT_TOOL_NAME","input":{"key":"value"}}
+
+Give final answer:
+{"thought":"reason","action":"none","answer":"your answer here"}
+
+════════════════════════════════════════════
+EXAMPLES
+════════════════════════════════════════════
+User: hello
+You: {"thought":"greeting","action":"none","answer":"Hello! I'm sudoai. How can I help?"}
+
+User: list the files here
+You: {"thought":"list CWD files","action":"${firstFileTool}","input":{"path":"."}}
+[Tool result]: file1.ts, README.md
+You: {"thought":"have the list","action":"none","answer":"Files:\\n- file1.ts\\n- README.md"}
+
+User: search latest AI news
+You: {"thought":"search web","action":"${firstWebTool}","input":{"query":"latest AI news 2025"}}
+[Tool result]: ...
+You: {"thought":"synthesize","action":"none","answer":"Here is what I found: ..."}
+
+════════════════════════════════════════════
+AVAILABLE TOOLS (use EXACT names)
+════════════════════════════════════════════
+${toolCatalog}
+
+════════════════════════════════════════════
+RULES
+════════════════════════════════════════════
+- action must be "none" OR an exact tool name listed above
+- For greetings/opinions/general knowledge: use action "none" immediately
+- ONE tool call per response. After a tool result, give your final answer.
+- Do NOT use tool_calls, tool_code, function_call, or any other format
+- Do NOT output {"action":"error"} — use "none" if you are stuck`;
   }
 
-  /**
-   * Serialize history into only 'user'/'assistant' roles that Ollama local models can understand.
-   * 'tool' and 'system' roles are not natively supported by most local models and are silently
-   * dropped, causing the model to never see tool results.
-   */
-  private serializeHistory(): LLMMessage[] {
-    const messages = this.history.getMessages();
-    const result: LLMMessage[] = [];
 
-    for (const m of messages) {
-      if (m.role === 'user') {
-        result.push({ role: 'user', content: m.content });
-      } else if (m.role === 'assistant') {
-        result.push({ role: 'assistant', content: m.content });
-      } else if (m.role === 'tool') {
-        // Present tool results as an assistant observation so the model can read it
-        const toolName = (m as any).tool_calls?.name || 'tool';
-        let resultText = m.content;
-        // Truncate very large tool outputs in context
-        if (resultText.length > 6000) {
-          resultText = resultText.substring(0, 6000) + '\n... [output truncated]';
+  // ── Build LLM messages from internal turn log ────────────────────────────
+
+  private buildMessages(turns: TurnItem[]): LLMMessage[] {
+    const messages: LLMMessage[] = [
+      { role: 'system', content: this.buildSystemPrompt(turns) }
+    ];
+
+    for (const t of turns) {
+      if (t.role === 'user') {
+        messages.push({ role: 'user', content: t.content });
+      } else if (t.role === 'assistant_final') {
+        // Clean final answers go into context as assistant messages
+        messages.push({ role: 'assistant', content: t.content });
+      } else if (t.role === 'tool_result') {
+        // Tool results come in as user observations
+        let content = t.content;
+        if (content.length > MAX_TOOL_OUTPUT) {
+          content = content.slice(0, MAX_TOOL_OUTPUT) + '\n... [truncated]';
         }
-        result.push({
-          role: 'assistant',
-          content: `[Tool Result: ${toolName}]\n${resultText}`
+        messages.push({
+          role: 'user',
+          content: `[Tool result from ${t.toolName}]:\n${content}\n\nRespond with your next JSON action.`
         });
-      } else if (m.role === 'system') {
-        // Engine directives: inject as a user nudge so the model sees them
-        result.push({ role: 'user', content: `[System]: ${m.content}` });
+      } else if (t.role === 'system_notice') {
+        messages.push({ role: 'user', content: `[Notice]: ${t.content}` });
+      }
+      // tool_call turns are intentionally NOT fed back — prevents JSON blob poisoning
+    }
+
+    return messages;
+  }
+
+  // ── LLM call with format enforcement ─────────────────────────────────────
+
+  private async callWithRetry(
+    turns: TurnItem[],
+    onUpdate: (msg: string) => void
+  ): Promise<{ step: AgentStep | null; raw: string }> {
+    const baseMessages = this.buildMessages(turns);
+    const conversation = [...baseMessages];
+
+    for (let attempt = 0; attempt < MAX_FORMAT_RETRIES; attempt++) {
+      let raw: string;
+      try {
+        const resp = await this.provider.generate(conversation);
+        raw = resp.content.trim();
+      } catch (e: any) {
+        throw new Error(`LLM error: ${e.message}`);
+      }
+
+      const step = extractAgentStep(raw);
+      if (step) return { step, raw };
+
+      // Format failed — identify why
+      const hint = detectWrongFormat(raw)
+        ?? 'Your response is not valid JSON. Output ONLY a JSON object like: {"thought":"...","action":"none","answer":"..."} or {"thought":"...","action":"TOOL_NAME","input":{...}}';
+
+      if (attempt < MAX_FORMAT_RETRIES - 1) {
+        onUpdate(`⚠ Format error, retrying (${attempt + 1}/${MAX_FORMAT_RETRIES - 1})...`);
+        conversation.push({ role: 'assistant', content: raw });
+        conversation.push({
+          role: 'user',
+          content: `${hint}\n\nTry again. Output ONLY the JSON object.`
+        });
+      } else {
+        return { step: null, raw };
       }
     }
 
-    return result;
+    return { step: null, raw: '' };
   }
 
-  async run(userInput: string, onUpdate: (chunk: string) => void) {
+  // ── Main run loop ─────────────────────────────────────────────────────────
+
+  async run(userInput: string, onUpdate: (chunk: string) => void): Promise<string> {
+    // HistoryManager is for persistence (displayed in /history view)
+    // Internal turns[] drives the LLM context for this turn only
     if (userInput) {
       this.history.addMessage({ role: 'user', content: userInput });
     }
 
+    const turns: TurnItem[] = [];
+
+    // Seed turns from persisted history (only user and clean assistant messages)
+    for (const m of this.history.getMessages()) {
+      if (m.role === 'user') turns.push({ role: 'user', content: m.content });
+      else if (m.role === 'assistant') turns.push({ role: 'assistant_final', content: m.content });
+    }
+
     let currentStep = 0;
-    const calledTools: Set<string> = new Set();
+    const calledKeys = new Set<string>();
 
     while (currentStep < this.maxSteps) {
-      const llmMessages: LLMMessage[] = [
-        { role: 'system', content: this.constructSystemPrompt() },
-        ...this.serializeHistory()
-      ];
+      let step: AgentStep | null;
+      let raw: string;
 
-      let rawResponse: string;
       try {
-        const response = await this.provider.generate(llmMessages);
-        rawResponse = response.content;
+        ({ step, raw } = await this.callWithRetry(turns, onUpdate));
       } catch (e: any) {
-        const errMsg = `I encountered an error: ${e.message}`;
-        this.history.addMessage({ role: 'assistant', content: errMsg });
-        onUpdate(errMsg);
-        return errMsg;
+        const err = `❌ ${e.message}`;
+        this.history.addMessage({ role: 'assistant', content: err });
+        onUpdate(err);
+        return err;
       }
 
-      // Parse response — strip any accidental markdown fences
-      let parsedResponse: any;
-      try {
-        const cleaned = rawResponse.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-        parsedResponse = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
-      } catch (e) {
-        // Not parseable JSON — treat as a plain text final answer
-        this.history.addMessage({ role: 'assistant', content: rawResponse });
-        onUpdate(rawResponse);
-        return rawResponse;
+      // Format entirely unrecoverable — treat raw text as answer
+      if (!step) {
+        const clean = stripThinkTags(raw);
+        const answer = clean.length > 0
+          ? clean
+          : 'I could not formulate a response. Please try again.';
+        this.history.addMessage({ role: 'assistant', content: answer });
+        onUpdate(answer);
+        return answer;
       }
 
-      const { thought, action, input, answer } = parsedResponse;
+      const { thought, action, input, answer } = step;
 
-      // --- Final answer ---
+      // ── Final answer ──
       if (!action || action === 'none') {
-        const finalAnswer = answer || rawResponse;
+        const finalAnswer = answer ?? thought ?? 'Done.';
         this.history.addMessage({ role: 'assistant', content: finalAnswer, thought });
         onUpdate(finalAnswer);
         return finalAnswer;
       }
 
-      // --- ask_user special action ---
+      // ── ask_user ──
       if (action === 'ask_user') {
-        const question = input?.question || 'Could you clarify?';
-        this.history.addMessage({ role: 'assistant', content: question, thought });
-        onUpdate(question);
-        return question;
+        const q = input?.question ?? thought ?? 'Could you clarify?';
+        this.history.addMessage({ role: 'assistant', content: q });
+        onUpdate(q);
+        return q;
       }
 
-      // --- Tool call ---
-      const tool = this.registry.getTool(action);
+      // ── Tool lookup (with fuzzy match) ──
+      const tool = this.registry.findTool(action);
       if (!tool) {
-        this.history.addMessage({
-          role: 'system',
-          content: `Tool "${action}" not found. Available tools: ${this.registry.getAllTools().map(t => t.name).join(', ')}.`
+        onUpdate(`⚙ Unknown tool "${action}", retrying...`);
+        turns.push({
+          role: 'system_notice',
+          content: `"${action}" is not a valid tool. Valid tool names:\n${this.registry.getToolNames().join('\n')}\n\nUse action "none" if you don't need a tool.`
         });
         currentStep++;
         continue;
       }
 
-      // Deduplicate: don't call same tool+input twice
-      const callKey = `${action}:${JSON.stringify(input)}`;
-      if (calledTools.has(callKey)) {
-        this.history.addMessage({
-          role: 'system',
-          content: `You already called "${action}" with these exact inputs. Use the result already in context to produce your final answer.`
+      // ── Dedup ──
+      const callKey = `${tool.name}::${JSON.stringify(input ?? {})}`;
+      if (calledKeys.has(callKey)) {
+        turns.push({
+          role: 'system_notice',
+          content: `You already called "${tool.name}" with these args. Use the result in context to give your final answer with action "none".`
         });
         currentStep++;
         continue;
       }
-      calledTools.add(callKey);
+      calledKeys.add(callKey);
 
-      onUpdate(`[Thinking: ${thought || '...'}] → Using ${action}...`);
+      // ── Execute ──
+      onUpdate(`⚙ ${thought ? thought + ' — ' : ''}Calling ${tool.name}...`);
 
-      // Coerce common LLM mistakes: string booleans → actual booleans
-      const coercedInput = input ? Object.entries(input).reduce((acc: any, [k, v]) => {
-        if (v === 'true') acc[k] = true;
-        else if (v === 'false') acc[k] = false;
-        else acc[k] = v;
-        return acc;
-      }, {}) : input;
+      // Record the tool call turn (NOT fed back to LLM as assistant message)
+      turns.push({ role: 'tool_call', content: JSON.stringify({ action: tool.name, input }), toolName: tool.name });
+
+      const coercedInput = input
+        ? Object.fromEntries(Object.entries(input).map(([k, v]) => [
+            k, v === 'true' ? true : v === 'false' ? false : v
+          ]))
+        : {};
 
       try {
         const result = await tool.execute(coercedInput);
-        const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+        const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
+        // Store in persistence for /history
         this.history.addMessage({
           role: 'tool',
           content: resultStr,
-          tool_calls: { name: action, input },
+          tool_calls: { name: tool.name, input: coercedInput },
           tool_results: result
         });
+
+        // Add to LLM context as user observation
+        turns.push({ role: 'tool_result', content: resultStr, toolName: tool.name });
+
+        // Guard against empty/error results
+        const rObj = typeof result === 'object' && result !== null ? result as any : null;
+        if ((rObj?.results && rObj.results.length === 0) || rObj?.error) {
+          const reason = rObj?.error ? `Error: ${rObj.error}` : 'No results returned.';
+          turns.push({
+            role: 'system_notice',
+            content: `${reason} Do NOT retry. Use action "none" and answer from your own knowledge, noting this limitation.`
+          });
+        }
+
       } catch (e: any) {
-        this.history.addMessage({
-          role: 'system',
-          content: `Tool "${action}" threw an error: ${e.message}. Try a different approach.`
+        turns.push({
+          role: 'system_notice',
+          content: `Tool "${tool.name}" threw: ${e.message}. Try a different tool or use action "none".`
         });
       }
 
       currentStep++;
     }
 
-    // If we hit max steps, ask the model to synthesize with what it has
-    const finalMessages: LLMMessage[] = [
-      { role: 'system', content: this.constructSystemPrompt() },
-      ...this.history.getMessages().map(m => ({ role: m.role as any, content: m.content })),
-      { role: 'system', content: 'You have reached the maximum number of steps. Synthesize a final answer from the information gathered so far. Respond with JSON where action is "none".' }
-    ];
+    // ── Max steps — force synthesis ──
+    onUpdate('⚙ Synthesizing final answer...');
+    turns.push({
+      role: 'system_notice',
+      content: 'You have reached the maximum number of steps. Give your final answer NOW using {"thought":"...","action":"none","answer":"..."}'
+    });
 
     try {
-      const finalResponse = await this.provider.generate(finalMessages);
-      const cleaned = finalResponse.content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        const ans = parsed.answer || finalResponse.content;
-        this.history.addMessage({ role: 'assistant', content: ans });
-        onUpdate(ans);
-        return ans;
-      }
-    } catch (e) {
-      // fallthrough
+      const { step: finalStep, raw: finalRaw } = await this.callWithRetry(turns, onUpdate);
+      const ans = finalStep?.answer
+        ?? (stripThinkTags(finalRaw) || '⚠ Step limit reached. Please ask me to summarize.');
+      this.history.addMessage({ role: 'assistant', content: ans });
+      onUpdate(ans);
+      return ans;
+    } catch {
+      const fallback = '⚠ Step limit reached. Please ask me to summarize.';
+      this.history.addMessage({ role: 'assistant', content: fallback });
+      onUpdate(fallback);
+      return fallback;
     }
-
-    const fallback = 'I gathered the information but reached my step limit. Please ask me to summarize.';
-    this.history.addMessage({ role: 'assistant', content: fallback });
-    onUpdate(fallback);
-    return fallback;
   }
 }

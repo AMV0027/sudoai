@@ -4,6 +4,7 @@ import os from 'os';
 import { getDataDir } from './paths.js';
 
 export interface MCPServerConfig {
+  type?: string;
   command: string;
   args?: string[];
   env?: Record<string, string>;

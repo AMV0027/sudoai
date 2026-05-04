@@ -5,6 +5,7 @@ export interface LLMMessage {
 
 export interface LLMResponse {
   content: string;
+  thinking?: string;
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;

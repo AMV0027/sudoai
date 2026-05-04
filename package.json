@@ -1,6 +1,6 @@
 {
   "name": "sudoai-cli",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "A local-first AI runtime for developers, built as a terminal-native operating layer.",
   "license": "MIT",
   "main": "dist/index.js",

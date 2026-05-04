@@ -2,11 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import { getDataDir } from './paths.js';
 
+export type AgentMode = 'simple' | 'agent' | 'research';
+
 export interface AppConfig {
   model: string;
   mcpEnabled: boolean;
   setupComplete: boolean;
   ollamaApiKey?: string;
+  thinkingEnabled: boolean;
+  mode: AgentMode;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -14,6 +18,8 @@ const DEFAULT_CONFIG: AppConfig = {
   mcpEnabled: false,
   setupComplete: false,
   ollamaApiKey: '',
+  thinkingEnabled: false,
+  mode: 'simple',
 };
 
 export class ConfigManager {

@@ -17,7 +17,7 @@ const configManager = ConfigManager.getInstance();
 program
   .name('sudoai')
   .description('Terminal-native AI assistant')
-  .version('1.0.0');
+  .version('1.0.2');
 
 program
   .argument('[query]', 'A single question to ask')
